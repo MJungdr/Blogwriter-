@@ -69,6 +69,16 @@ multi-agent/
 
 ## 🛠 Installation
 
+### Start BlogGPT (Windows)
+
+After completing the backend and frontend installation once, start both services from the project root with:
+
+```powershell
+.\start-bloggpt.ps1
+```
+
+This opens separate PowerShell windows for the backend and frontend. Keep those windows open while using BlogGPT, then visit `http://localhost:3000`.
+
 ### Backend Setup (FastAPI Server) on macOS
 1. Install Python 3.13. CrewAI does not support Python 3.14. From Terminal, create and activate the virtual environment:
 

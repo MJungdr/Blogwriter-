@@ -63,6 +63,10 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
         "host": app_cfg.get("host", "127.0.0.1"),
         "port": app_cfg.get("port", 8002),
         "cors_origins": app_cfg.get("cors_origins", ["http://localhost:3000", "http://127.0.0.1:3000"]),
+        "cors_origin_regex": app_cfg.get(
+            "cors_origin_regex",
+            r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+        ),
         "llm_model": llm_cfg.get("model", "gemini/gemini-3.5-flash"),
         "crew_verbose": crew_cfg.get("verbose", True),
         "search_provider": search_provider,
@@ -79,6 +83,7 @@ settings = load_config()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings["cors_origins"],
+    allow_origin_regex=settings["cors_origin_regex"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
