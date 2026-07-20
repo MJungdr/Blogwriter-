@@ -4,6 +4,9 @@ app:
   cors_origins:
     - http://localhost:3000
     - http://127.0.0.1:3000
+  # Next.js may select another port when 3000 is already occupied.
+  # Keep browser access restricted to services running on this computer.
+  cors_origin_regex: '^https?://(localhost|127\.0\.0\.1)(:\d+)?$'
 
 llm:
   model: gemini/gemini-3.5-flash
