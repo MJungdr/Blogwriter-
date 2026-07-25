@@ -116,7 +116,34 @@ class DocumentRequest(BaseModel):
 
 
 class SearchInput(BaseModel):
-    search_query: str = Field(..., description="Mandatory search query you want to use to search the internet")
+    search_query: str = Field(
+        ...,
+        description=(
+            "One search query. Pass exactly one key-value object per tool call, for example "
+            '{"search_query": "AI research tools"}. Never pass a list of queries.'
+        ),
+    )
+
+
+def validate_planner_output(task_output):
+    """Reject tool-format apologies that are not usable research plans."""
+    output = task_output.raw.strip()
+    normalized = output.lower()
+    invalid_final_answer_markers = (
+        "action input",
+        "valid key, value dictionary",
+        "must pass a simple json object",
+        "let me correct the input format",
+        "let me search again",
+    )
+    if any(marker in normalized for marker in invalid_final_answer_markers):
+        return (
+            False,
+            "Do not return an explanation about tool input as the final answer. Use the Search the internet "
+            "tool before finalizing. Call it once per query with exactly one object such as "
+            '{"search_query": "research topic"}, then return the requested content plan with sources.',
+        )
+    return True, output
 
 
 def gemini_api_model_name(model: str) -> str:
@@ -128,8 +155,10 @@ def gemini_api_model_name(model: str) -> str:
 class AutoSearchTool(BaseTool):
     name: str = "Search the internet"
     description: str = (
-        "Searches the internet. In auto mode it tries Serper first, then falls back to "
-        "Gemini Google Search grounding if Serper is unavailable or unauthorized."
+        "Searches the internet for one query at a time. Call this tool separately for each query and "
+        "pass a single object with the search_query key; never pass a list of query objects. In auto "
+        "mode it tries Serper first, then falls back to Gemini Google Search grounding if Serper is "
+        "unavailable or unauthorized."
     )
     args_schema: type[BaseModel] = SearchInput
     provider: str = "auto"
@@ -335,6 +364,11 @@ def build_crew() -> Crew:
         api_key=os.getenv("GOOGLE_API_KEY"),
         model=settings["llm_model"],
     )
+    # CrewAI's Gemini native function-calling path can return an empty text response
+    # after a tool call because the agent executor uses its own ReAct tool loop.
+    # Keep tool execution in that loop so each observation is fed back to the model.
+    if hasattr(llm, "supports_tools"):
+        llm.supports_tools = False
 
     planner = Agent(
         role="Content Planner",
@@ -384,13 +418,16 @@ def build_crew() -> Crew:
             "1. Prioritize the latest verified trends, key players, and noteworthy news on {topic}.\n"
             "2. Identify the target audience, considering their interests and pain points.\n"
             "3. Develop a detailed content outline including an introduction, key points, and a call to action.\n"
+
             "4. Include SEO keywords and source URLs from the research packet.\n"
             "5. Treat older model knowledge as stale whenever it conflicts with dated live research."
+
         ),
         expected_output=(
             "A comprehensive content plan with outline, audience analysis, SEO keywords, and resources."
         ),
         agent=planner,
+
     )
 
     write_task = Task(
@@ -542,4 +579,3 @@ async def download_word(request: DocumentRequest) -> StreamingResponse:
     except Exception as exc:
         logger.exception("Word document creation failed for topic %r", request.topic)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
