@@ -101,7 +101,13 @@ class DocumentRequest(BaseModel):
 
 
 class SearchInput(BaseModel):
-    search_query: str = Field(..., description="Mandatory search query you want to use to search the internet")
+    search_query: str = Field(
+        ...,
+        description=(
+            "One search query. Pass exactly one key-value object per tool call, for example "
+            '{"search_query": "AI research tools"}. Never pass a list of queries.'
+        ),
+    )
 
 
 def gemini_api_model_name(model: str) -> str:
@@ -113,8 +119,10 @@ def gemini_api_model_name(model: str) -> str:
 class AutoSearchTool(BaseTool):
     name: str = "Search the internet"
     description: str = (
-        "Searches the internet. In auto mode it tries Serper first, then falls back to "
-        "Gemini Google Search grounding if Serper is unavailable or unauthorized."
+        "Searches the internet for one query at a time. Call this tool separately for each query and "
+        "pass a single object with the search_query key; never pass a list of query objects. In auto "
+        "mode it tries Serper first, then falls back to Gemini Google Search grounding if Serper is "
+        "unavailable or unauthorized."
     )
     args_schema: type[BaseModel] = SearchInput
     provider: str = "auto"
@@ -347,7 +355,10 @@ def build_crew() -> Crew:
             "1. Prioritize the latest trends, key players, and noteworthy news on {topic}.\n"
             "2. Identify the target audience, considering their interests and pain points.\n"
             "3. Develop a detailed content outline including an introduction, key points, and a call to action.\n"
-            "4. Include SEO keywords and relevant data or sources."
+            "4. Include SEO keywords and relevant data or sources.\n"
+            "5. You may research multiple angles, but call the Search the internet tool once per query. "
+            "Every tool input must be exactly one object, for example: {{\"search_query\": \"{topic} latest trends\"}}. "
+            "Never send a list or array of search queries."
         ),
         expected_output=(
             "A comprehensive content plan with outline, audience analysis, SEO keywords, and resources."
@@ -450,4 +461,3 @@ async def download_word(request: DocumentRequest) -> StreamingResponse:
     except Exception as exc:
         logger.exception("Word document creation failed for topic %r", request.topic)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
