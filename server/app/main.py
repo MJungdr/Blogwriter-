@@ -110,6 +110,27 @@ class SearchInput(BaseModel):
     )
 
 
+def validate_planner_output(task_output):
+    """Reject tool-format apologies that are not usable research plans."""
+    output = task_output.raw.strip()
+    normalized = output.lower()
+    invalid_final_answer_markers = (
+        "action input",
+        "valid key, value dictionary",
+        "must pass a simple json object",
+        "let me correct the input format",
+        "let me search again",
+    )
+    if any(marker in normalized for marker in invalid_final_answer_markers):
+        return (
+            False,
+            "Do not return an explanation about tool input as the final answer. Use the Search the internet "
+            "tool before finalizing. Call it once per query with exactly one object such as "
+            '{"search_query": "research topic"}, then return the requested content plan with sources.',
+        )
+    return True, output
+
+
 def gemini_api_model_name(model: str) -> str:
     if model.startswith("gemini/"):
         return model.split("/", 1)[1]
@@ -302,6 +323,11 @@ def build_crew() -> Crew:
         api_key=os.getenv("GOOGLE_API_KEY"),
         model=settings["llm_model"],
     )
+    # CrewAI's Gemini native function-calling path can return an empty text response
+    # after a tool call because the agent executor uses its own ReAct tool loop.
+    # Keep tool execution in that loop so each observation is fed back to the model.
+    if hasattr(llm, "supports_tools"):
+        llm.supports_tools = False
 
     search_tool = AutoSearchTool(
         provider=settings["search_provider"],
@@ -357,7 +383,7 @@ def build_crew() -> Crew:
             "3. Develop a detailed content outline including an introduction, key points, and a call to action.\n"
             "4. Include SEO keywords and relevant data or sources.\n"
             "5. You may research multiple angles, but call the Search the internet tool once per query. "
-            "Every tool input must be exactly one object, for example: {{\"search_query\": \"{topic} latest trends\"}}. "
+            "Every tool input must be exactly one object, for example: {\"search_query\": \"{topic} latest trends\"}. "
             "Never send a list or array of search queries."
         ),
         expected_output=(
@@ -365,6 +391,8 @@ def build_crew() -> Crew:
         ),
         agent=planner,
         tools=[search_tool],
+        guardrail=validate_planner_output,
+        guardrail_max_retries=2,
     )
 
     write_task = Task(
