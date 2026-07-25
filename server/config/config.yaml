@@ -12,7 +12,9 @@ llm:
   model: gemini/gemini-3.5-flash
 
 search:
-  provider: auto
+  # The configured Serper credential is currently unauthorized (HTTP 403).
+  # Use Gemini Google Search grounding directly for reliable live research.
+  provider: gemini
 
 crew:
   verbose: true

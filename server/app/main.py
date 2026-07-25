@@ -6,6 +6,7 @@ import binascii
 import logging
 import os
 import re
+from datetime import date
 from io import BytesIO
 from typing import Any, Dict
 from urllib.parse import quote
@@ -27,6 +28,20 @@ from crewai_tools import SerperDevTool
 
 
 logger = logging.getLogger(__name__)
+
+MAX_RESEARCH_CHARS = 24_000
+LLM_EMPTY_RESPONSE_RETRIES = 2
+
+
+def show_progress(message: str) -> None:
+    """Write safe execution progress to the backend terminal immediately."""
+    print(f"[BlogGPT] {message}", flush=True)
+
+
+def show_task_completion(output: Any) -> None:
+    """Report task completion without exposing prompts or private reasoning."""
+    agent_name = getattr(output, "agent", None) or "Agent"
+    show_progress(f"Completed: {agent_name}")
 
 
 # Simple config loader (YAML + env overrides)
@@ -149,6 +164,7 @@ class AutoSearchTool(BaseTool):
     provider: str = "auto"
     gemini_model: str = "gemini-3.5-flash"
     _serper_tool: SerperDevTool | None = PrivateAttr(default=None)
+    _serper_disabled: bool = PrivateAttr(default=False)
 
     def model_post_init(self, __context: Any) -> None:
         super().model_post_init(__context)
@@ -157,18 +173,43 @@ class AutoSearchTool(BaseTool):
             self._serper_tool = SerperDevTool()
 
     def _run(self, search_query: str, **_: Any) -> str:
-        if self.provider in {"auto", "serper"} and self._serper_tool:
+        if self.provider in {"auto", "serper"} and self._serper_tool and not self._serper_disabled:
             try:
                 result = self._serper_tool._run(search_query=search_query)
-                return str(result)
+                result_text = str(result)
+                if self.provider == "auto" and self._is_search_error(result_text):
+                    logger.warning("Serper returned an unusable response; falling back to Gemini Google Search")
+                else:
+                    return result_text
             except Exception as exc:
                 if self.provider == "serper":
                     raise
+                status_code = getattr(getattr(exc, "response", None), "status_code", None)
+                if status_code in {401, 403}:
+                    self._serper_disabled = True
+                    logger.warning(
+                        "Serper authentication was rejected; Gemini Google Search will be used for future requests"
+                    )
                 logger.warning("Serper search failed; falling back to Gemini Google Search: %s", exc)
         elif self.provider == "serper":
             raise RuntimeError("SERPER_API_KEY is required when SEARCH_PROVIDER=serper")
 
         return self._run_gemini_search(search_query)
+
+    @staticmethod
+    def _is_search_error(result: str) -> bool:
+        normalized = result.lower()
+        error_markers = (
+            "unauthorized",
+            "forbidden",
+            "invalid api key",
+            "quota exceeded",
+            "rate limit",
+            "too many requests",
+            "payment required",
+            "credits exhausted",
+        )
+        return not result.strip() or any(marker in normalized for marker in error_markers)
 
     def _run_gemini_search(self, search_query: str) -> str:
         client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
@@ -329,11 +370,6 @@ def build_crew() -> Crew:
     if hasattr(llm, "supports_tools"):
         llm.supports_tools = False
 
-    search_tool = AutoSearchTool(
-        provider=settings["search_provider"],
-        gemini_model=settings["llm_model"],
-    )
-
     planner = Agent(
         role="Content Planner",
         goal="Plan engaging and factually accurate content on {topic}",
@@ -346,7 +382,6 @@ def build_crew() -> Crew:
         allow_delegation=False,
         verbose=settings["crew_verbose"],
         llm=llm,
-        tools=[search_tool],
     )
 
     writer = Agent(
@@ -378,30 +413,31 @@ def build_crew() -> Crew:
 
     plan_task = Task(
         description=(
-            "1. Prioritize the latest trends, key players, and noteworthy news on {topic}.\n"
+            "Today is {current_date}. Use the mandatory live-research packet below as the factual baseline.\n"
+            "LIVE RESEARCH:\n{research}\n\n"
+            "1. Prioritize the latest verified trends, key players, and noteworthy news on {topic}.\n"
             "2. Identify the target audience, considering their interests and pain points.\n"
             "3. Develop a detailed content outline including an introduction, key points, and a call to action.\n"
-            "4. Include SEO keywords and relevant data or sources.\n"
-            "5. You may research multiple angles, but call the Search the internet tool once per query. "
-            "Every tool input must be exactly one object, for example: {\"search_query\": \"{topic} latest trends\"}. "
-            "Never send a list or array of search queries."
+
+            "4. Include SEO keywords and source URLs from the research packet.\n"
+            "5. Treat older model knowledge as stale whenever it conflicts with dated live research."
+
         ),
         expected_output=(
             "A comprehensive content plan with outline, audience analysis, SEO keywords, and resources."
         ),
         agent=planner,
-        tools=[search_tool],
-        guardrail=validate_planner_output,
-        guardrail_max_retries=2,
+
     )
 
     write_task = Task(
         description=(
-            "1. Use the content plan to craft a compelling blog post on {topic}.\n"
+            "Today is {current_date}. Use the content plan and its live sources to craft a compelling blog post on {topic}.\n"
             "2. Incorporate SEO keywords naturally.\n"
             "3. Sections/Subtitles are properly named in an engaging manner.\n"
             "4. Ensure the post has an engaging introduction, insightful body, and a summarizing conclusion.\n"
-            "5. Proofread for grammatical errors and alignment with the brand's voice."
+            "5. Proofread for grammatical errors and alignment with the brand's voice.\n"
+            "6. Preserve dates and source links. Do not replace current facts with older model knowledge."
         ),
         expected_output=(
             "A well-written blog post in markdown format, ready for publication, with 2-3 paragraphs per section."
@@ -411,7 +447,9 @@ def build_crew() -> Crew:
 
     edit_task = Task(
         description=(
-            "Proofread the given blog post for grammatical errors and alignment with the brand's voice."
+            "Today is {current_date}. Proofread the given blog post for grammatical errors and alignment "
+            "with the brand's voice. Preserve verified dates and source URLs from the live research. "
+            "Do not introduce unsupported facts or revert current facts to older model knowledge."
         ),
         expected_output=(
             "A well-written blog post in markdown format (no leading word 'markdown'), ready for publication, "
@@ -424,13 +462,17 @@ def build_crew() -> Crew:
         agents=[planner, writer, editor],
         tasks=[plan_task, write_task, edit_task],
         verbose=settings["crew_verbose"],
+        task_callback=show_task_completion,
     )
 
 
 # Store crew in app state at startup
 @app.on_event("startup")
 def startup() -> None:
-    app.state.crew = build_crew()
+    app.state.search_tool = AutoSearchTool(
+        provider=settings["search_provider"],
+        gemini_model=settings["llm_model"],
+    )
 
 
 @app.post("/generate-blog/")
@@ -438,15 +480,63 @@ async def generate_blog(request: TopicRequest) -> Dict[str, Any]:
     if not request.topic or not request.topic.strip():
         raise HTTPException(status_code=400, detail="'topic' must be provided")
 
-    crew = app.state.crew
     try:
-        # CrewAI and some of its tools use synchronous internals. Running the
-        # workflow in a worker thread keeps them outside FastAPI's event loop.
-        result = await asyncio.to_thread(
-            crew.kickoff,
-            inputs={"topic": request.topic.strip()},
+        current_date = date.today().isoformat()
+        show_progress(f"Researching current information for: {request.topic.strip()}")
+        research_query = (
+            f"As of {current_date}, research the latest verified facts and developments about: "
+            f"{request.topic.strip()}. Prioritize primary and reputable recent sources. Include exact dates, "
+            "current status, and source URLs. Explicitly correct common outdated claims."
         )
+        research = await asyncio.to_thread(
+            app.state.search_tool._run,
+            research_query,
+        )
+        if not research.strip():
+            raise RuntimeError("Live research returned no results; refusing to generate a potentially stale report")
+        show_progress("Live research complete; starting the agent workflow")
+
+        # Search providers can return very large result payloads. Keeping the
+        # packet bounded prevents an oversized prompt from producing an empty
+        # LLM response while retaining ample room for current facts and URLs.
+        research = research[:MAX_RESEARCH_CHARS]
+
+        inputs = {
+            "topic": request.topic.strip(),
+            "current_date": current_date,
+            "research": research,
+        }
+        result = None
+        for attempt in range(LLM_EMPTY_RESPONSE_RETRIES + 1):
+            # Crew and agent instances contain mutable execution state. A new
+            # crew per attempt prevents state leaking across requests/retries.
+            crew = build_crew()
+            try:
+                show_progress(
+                    "Running planner, writer, and editor"
+                    + (f" (retry {attempt})" if attempt else "")
+                )
+                # CrewAI and some of its tools use synchronous internals.
+                result = await asyncio.to_thread(crew.kickoff, inputs=inputs)
+                break
+            except ValueError as exc:
+                is_empty_response = "Invalid response from LLM call - None or empty" in str(exc)
+                if not is_empty_response or attempt >= LLM_EMPTY_RESPONSE_RETRIES:
+                    raise
+                delay_seconds = 2 ** attempt
+                logger.warning(
+                    "Gemini returned an empty response; retrying with a fresh crew in %s second(s) (%s/%s)",
+                    delay_seconds,
+                    attempt + 1,
+                    LLM_EMPTY_RESPONSE_RETRIES,
+                )
+                show_progress(f"Gemini returned an empty response; retrying in {delay_seconds} second(s)")
+                await asyncio.sleep(delay_seconds)
+
+        if result is None:
+            raise RuntimeError("Blog generation completed without a result")
         blog_text = getattr(result, "raw", None) or str(result)
+        show_progress("Blog generation complete")
         return {"topic": request.topic, "blog": {"raw": blog_text}}
     except Exception as exc:
         logger.exception("Blog generation failed for topic %r", request.topic)
