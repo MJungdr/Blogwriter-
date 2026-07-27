@@ -12,7 +12,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Download } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Download } from "lucide-react";
 import { marked } from "marked";
 import Image from "next/image";
 import DOMPurify from "dompurify";
@@ -26,6 +26,7 @@ const BlogGeneratorPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState<boolean>(false);
+  const [downloaded, setDownloaded] = useState<boolean>(false);
 
   const handleGenerateBlog = async (topic: string) => {
     setLoading(true);
@@ -35,6 +36,7 @@ const BlogGeneratorPage: React.FC = () => {
     setCurrentTopic(topic);
     setImageUrl(null);
     setImageError(null);
+    setDownloaded(false);
 
     try {
       const blogData = await generateBlog(topic);
@@ -79,6 +81,7 @@ const BlogGeneratorPage: React.FC = () => {
     setImageUrl(null);
     setImageError(null);
     setError(null);
+    setDownloaded(false);
   };
 
   const handleDownloadWord = async () => {
@@ -109,6 +112,7 @@ const BlogGeneratorPage: React.FC = () => {
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(downloadUrl);
+      setDownloaded(true);
     } catch (downloadError) {
       setError((downloadError as Error).message);
     } finally {
@@ -136,9 +140,25 @@ const BlogGeneratorPage: React.FC = () => {
                 <Button variant="outline" onClick={handleReset}>
                   <ArrowLeft className="mr-2 h-4 w-4" /> Generate Another Blog
                 </Button>
-                <Button onClick={handleDownloadWord} disabled={downloading}>
-                  <Download className="mr-2 h-4 w-4" />
-                  {downloading ? "Creating Word File..." : "Download as Word"}
+                <Button
+                  onClick={handleDownloadWord}
+                  disabled={downloading}
+                  className={
+                    downloaded
+                      ? "bg-green-600 text-white hover:bg-green-700 dark:bg-green-600 dark:text-white dark:hover:bg-green-700"
+                      : undefined
+                  }
+                >
+                  {downloaded ? (
+                    <CheckCircle2 className="mr-2 h-4 w-4" />
+                  ) : (
+                    <Download className="mr-2 h-4 w-4" />
+                  )}
+                  {downloading
+                    ? "Creating Word File..."
+                    : downloaded
+                      ? "Downloaded"
+                      : "Download as Word"}
                 </Button>
               </div>
               {imageUrl && (
