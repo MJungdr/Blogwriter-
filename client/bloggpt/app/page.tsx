@@ -12,7 +12,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, CheckCircle2, Download } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Download, FileText } from "lucide-react";
 import { marked } from "marked";
 import Image from "next/image";
 import DOMPurify from "dompurify";
@@ -27,6 +27,7 @@ const BlogGeneratorPage: React.FC = () => {
   const [imageError, setImageError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState<boolean>(false);
   const [downloaded, setDownloaded] = useState<boolean>(false);
+  const [markdownDownloaded, setMarkdownDownloaded] = useState<boolean>(false);
 
   const handleGenerateBlog = async (topic: string) => {
     setLoading(true);
@@ -37,6 +38,7 @@ const BlogGeneratorPage: React.FC = () => {
     setImageUrl(null);
     setImageError(null);
     setDownloaded(false);
+    setMarkdownDownloaded(false);
 
     try {
       const blogData = await generateBlog(topic);
@@ -82,6 +84,7 @@ const BlogGeneratorPage: React.FC = () => {
     setImageError(null);
     setError(null);
     setDownloaded(false);
+    setMarkdownDownloaded(false);
   };
 
   const handleDownloadWord = async () => {
@@ -117,6 +120,29 @@ const BlogGeneratorPage: React.FC = () => {
       setError((downloadError as Error).message);
     } finally {
       setDownloading(false);
+    }
+  };
+
+  const handleDownloadMarkdown = () => {
+    setError(null);
+    try {
+      const blob = new Blob([blogMarkdown], {
+        type: "text/markdown;charset=utf-8",
+      });
+      const downloadUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      const safeName = currentTopic
+        .replace(/[^a-z0-9_-]+/gi, "-")
+        .replace(/^-|-$/g, "");
+      anchor.href = downloadUrl;
+      anchor.download = `${safeName || "generated-article"}.md`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(downloadUrl);
+      setMarkdownDownloaded(true);
+    } catch (downloadError) {
+      setError((downloadError as Error).message);
     }
   };
 
@@ -160,6 +186,24 @@ const BlogGeneratorPage: React.FC = () => {
                       ? "Downloaded"
                       : "Download as Word"}
                 </Button>
+                <Button
+                  variant={markdownDownloaded ? "default" : "secondary"}
+                  onClick={handleDownloadMarkdown}
+                  className={
+                    markdownDownloaded
+                      ? "bg-green-600 text-white hover:bg-green-700 dark:bg-green-600 dark:text-white dark:hover:bg-green-700"
+                      : undefined
+                  }
+                >
+                  {markdownDownloaded ? (
+                    <CheckCircle2 className="mr-2 h-4 w-4" />
+                  ) : (
+                    <FileText className="mr-2 h-4 w-4" />
+                  )}
+                  {markdownDownloaded
+                    ? "Markdown Downloaded"
+                    : "Download as Markdown"}
+                </Button>
               </div>
               {imageUrl && (
                 <div className="relative w-full h-64 md:h-96 rounded-lg overflow-hidden">
@@ -185,7 +229,7 @@ const BlogGeneratorPage: React.FC = () => {
               )}
               {error && (
                 <div className="rounded border border-red-400 bg-red-50 px-4 py-3 text-red-700">
-                  Word download failed: {error}
+                  Download failed: {error}
                 </div>
               )}
               <div
