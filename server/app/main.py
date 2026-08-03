@@ -13,7 +13,9 @@ from urllib.parse import quote
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
 from docx.shared import Inches, Pt, RGBColor
+from docx.text.paragraph import Paragraph
 from dotenv import load_dotenv, find_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -146,6 +148,28 @@ def validate_planner_output(task_output):
     return True, output
 
 
+def validate_article_references(article: str) -> tuple[bool, str]:
+    """Check the minimum citation contract before an article leaves the API."""
+    references_match = re.search(r"(?im)^##\s+references\s*$", article)
+    if not references_match:
+        return False, "missing a level-two References section"
+
+    body = article[: references_match.start()]
+    references = article[references_match.end() :]
+    link_pattern = re.compile(r"\[[^]]+\]\((https?://[^)]+)\)")
+    inline_urls = set(link_pattern.findall(body))
+    reference_urls = set(link_pattern.findall(references))
+    if not inline_urls:
+        return False, "missing inline Markdown citations"
+    if not reference_urls:
+        return False, "References contains no clickable source links"
+
+    missing_from_references = inline_urls - reference_urls
+    if missing_from_references:
+        return False, "one or more inline citations are absent from References"
+    return True, ""
+
+
 def gemini_api_model_name(model: str) -> str:
     if model.startswith("gemini/"):
         return model.split("/", 1)[1]
@@ -228,14 +252,46 @@ class AutoSearchTool(BaseTool):
         return str(interaction)
 
 
-def add_markdown_runs(paragraph: Any, text: str) -> None:
+def add_hyperlink(paragraph: Paragraph, label: str, url: str) -> None:
+    """Add a clickable external hyperlink to a python-docx paragraph."""
+    relationship_id = paragraph.part.relate_to(
+        url,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+        is_external=True,
+    )
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(
+        "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id",
+        relationship_id,
+    )
+    run = OxmlElement("w:r")
+    run_properties = OxmlElement("w:rPr")
+    color = OxmlElement("w:color")
+    color.set("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val", "0563C1")
+    underline = OxmlElement("w:u")
+    underline.set("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val", "single")
+    run_properties.extend((color, underline))
+    run.append(run_properties)
+    text_element = OxmlElement("w:t")
+    text_element.text = label
+    run.append(text_element)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
+
+
+def add_markdown_runs(paragraph: Paragraph, text: str) -> None:
     text = re.sub(r"!\[([^]]*)\]\([^)]*\)", r"\1", text)
-    text = re.sub(r"\[([^]]+)\]\([^)]+\)", r"\1", text)
-    parts = re.split(r"(\*\*.+?\*\*|__.+?__|(?<!\*)\*[^*]+?\*(?!\*))", text)
+    parts = re.split(
+        r"(\[[^]]+\]\(https?://[^)]+\)|\*\*.+?\*\*|__.+?__|(?<!\*)\*[^*]+?\*(?!\*))",
+        text,
+    )
     for part in parts:
         if not part:
             continue
-        if (part.startswith("**") and part.endswith("**")) or (
+        link_match = re.fullmatch(r"\[([^]]+)\]\((https?://[^)]+)\)", part)
+        if link_match:
+            add_hyperlink(paragraph, link_match.group(1), link_match.group(2))
+        elif (part.startswith("**") and part.endswith("**")) or (
             part.startswith("__") and part.endswith("__")
         ):
             run = paragraph.add_run(part[2:-2])
@@ -419,8 +475,13 @@ def build_crew() -> Crew:
             "2. Identify the target audience, considering their interests and pain points.\n"
             "3. Develop a detailed content outline including an introduction, key points, and a call to action.\n"
 
-            "4. Include SEO keywords and source URLs from the research packet.\n"
-            "5. Treat older model knowledge as stale whenever it conflicts with dated live research."
+            "4. Build an evidence ledger that maps every proposed factual claim, statistic, clinical or "
+            "scientific statement, current event, and attributed point of view to at least one source.\n"
+            "5. For each source record its title, publisher/author, publication date when available, and direct URL. "
+            "Prefer primary sources (original studies, official datasets, regulators, company filings, and direct "
+            "statements); use reputable journalism for context or when no primary source is available.\n"
+            "6. Include SEO keywords. Treat older model knowledge as stale whenever it conflicts with dated live "
+            "research. Omit claims that cannot be supported by a source in the research packet."
 
         ),
         expected_output=(
@@ -437,10 +498,21 @@ def build_crew() -> Crew:
             "3. Sections/Subtitles are properly named in an engaging manner.\n"
             "4. Ensure the post has an engaging introduction, insightful body, and a summarizing conclusion.\n"
             "5. Proofread for grammatical errors and alignment with the brand's voice.\n"
-            "6. Preserve dates and source links. Do not replace current facts with older model knowledge."
+            "6. Cite every externally verifiable factual claim immediately after the sentence or paragraph using "
+            "Markdown links, for example ([WHO](https://example.org/report)). This includes numbers, dates, "
+            "comparisons, clinical/scientific findings, quotations, news, and claims about people or organizations.\n"
+            "7. Clearly label analysis and opinions with phrasing such as 'In my view' or 'This suggests'. Support "
+            "each point of view with links to the evidence, reporting, expert commentary, or data it interprets; do "
+            "not present an opinion as settled fact.\n"
+            "8. End with a '## References' section containing one bullet per cited source: source title, publisher "
+            "or author, publication date when available, and a clickable direct URL. Every inline citation must "
+            "appear in References, and every References entry must be cited in the article. Never invent a citation, "
+            "title, date, author, or URL. Omit unsupported claims.\n"
+            "9. Preserve dates and source links. Do not replace current facts with older model knowledge."
         ),
         expected_output=(
-            "A well-written blog post in markdown format, ready for publication, with 2-3 paragraphs per section."
+            "A publication-ready Markdown blog post with 2-3 paragraphs per section, claim-level inline citations, "
+            "clearly identified evidence-backed viewpoints, and a complete References section."
         ),
         agent=writer,
     )
@@ -448,12 +520,18 @@ def build_crew() -> Crew:
     edit_task = Task(
         description=(
             "Today is {current_date}. Proofread the given blog post for grammatical errors and alignment "
-            "with the brand's voice. Preserve verified dates and source URLs from the live research. "
-            "Do not introduce unsupported facts or revert current facts to older model knowledge."
+            "with the brand's voice. Perform a final citation audit sentence by sentence. Every factual claim, "
+            "statistic, clinical/scientific statement, quotation, news item, and attributed or author point of view "
+            "must have a nearby Markdown citation to a source that actually supports it. Clearly distinguish facts "
+            "from analysis/opinion. Remove or qualify anything unsupported. Preserve verified dates and direct source "
+            "URLs from the live research; never fabricate or guess bibliographic details. Ensure the final '## "
+            "References' list is complete, deduplicated, and consistent with the inline citations. Do not introduce "
+            "unsupported facts or revert current facts to older model knowledge."
         ),
         expected_output=(
             "A well-written blog post in markdown format (no leading word 'markdown'), ready for publication, "
-            "with 2-3 paragraphs per section."
+            "with 2-3 paragraphs per section, inline citations for every fact and point of view, and a complete "
+            "References section with clickable direct URLs."
         ),
         agent=editor,
     )
@@ -486,7 +564,9 @@ async def generate_blog(request: TopicRequest) -> Dict[str, Any]:
         research_query = (
             f"As of {current_date}, research the latest verified facts and developments about: "
             f"{request.topic.strip()}. Prioritize primary and reputable recent sources. Include exact dates, "
-            "current status, and source URLs. Explicitly correct common outdated claims."
+            "current status, clinical or scientific studies, relevant datasets, contrasting expert viewpoints, "
+            "and related news. For every fact or viewpoint, identify the supporting source title, publisher/author, "
+            "publication date when available, and direct URL. Explicitly correct common outdated claims."
         )
         research = await asyncio.to_thread(
             app.state.search_tool._run,
@@ -518,6 +598,20 @@ async def generate_blog(request: TopicRequest) -> Dict[str, Any]:
                 )
                 # CrewAI and some of its tools use synchronous internals.
                 result = await asyncio.to_thread(crew.kickoff, inputs=inputs)
+                blog_text = getattr(result, "raw", None) or str(result)
+                references_valid, validation_error = validate_article_references(blog_text)
+                if not references_valid:
+                    if attempt >= LLM_EMPTY_RESPONSE_RETRIES:
+                        raise RuntimeError(
+                            "Generated article failed the citation audit: " + validation_error
+                        )
+                    logger.warning(
+                        "Generated article failed the citation audit (%s); retrying with a fresh crew",
+                        validation_error,
+                    )
+                    show_progress("Citation audit failed; regenerating the article with verified references")
+                    result = None
+                    continue
                 break
             except ValueError as exc:
                 is_empty_response = "Invalid response from LLM call - None or empty" in str(exc)

@@ -13,12 +13,20 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ArrowLeft, CheckCircle2, Download, FileText } from "lucide-react";
-import { marked } from "marked";
+import { marked, Renderer } from "marked";
 import Image from "next/image";
 import DOMPurify from "dompurify";
 
+const articleRenderer = new Renderer();
+const renderLink = articleRenderer.link.bind(articleRenderer);
+articleRenderer.link = (token) =>
+  renderLink(token).replace(
+    "<a ",
+    '<a target="_blank" rel="noopener noreferrer" ',
+  );
+
 const BlogGeneratorPage: React.FC = () => {
-  const [blog, setBlog] = useState<any | null>(null);
+  const [blog, setBlog] = useState<string | null>(null);
   const [blogMarkdown, setBlogMarkdown] = useState<string>("");
   const [currentTopic, setCurrentTopic] = useState<string>("");
   const [imageUrl, setImageUrl] = useState<string | null>(null);
@@ -46,8 +54,15 @@ const BlogGeneratorPage: React.FC = () => {
         .replace(/^```markdown\n/, "") // Remove the opening ```markdown
         .replace(/\n```$/, "") // Remove the closing ```
         .trim();
-      const htmlBlog = marked(cleanedBlog);
-      setBlog(htmlBlog);
+      const htmlBlog = marked(cleanedBlog, {
+        renderer: articleRenderer,
+        async: false,
+      });
+      setBlog(
+        DOMPurify.sanitize(htmlBlog, {
+          ADD_ATTR: ["target", "rel"],
+        }),
+      );
       setBlogMarkdown(cleanedBlog);
 
       // Image generation is separate so an image failure does not discard
@@ -234,7 +249,7 @@ const BlogGeneratorPage: React.FC = () => {
               )}
               <div
                 className="prose lg:prose-xl dark:prose-invert max-w-none"
-                dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(blog) }}
+                dangerouslySetInnerHTML={{ __html: blog }}
               />
             </div>
           ) : (
