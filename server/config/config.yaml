@@ -9,12 +9,13 @@ app:
   cors_origin_regex: '^https?://(localhost|127\.0\.0\.1)(:\d+)?$'
 
 llm:
-  model: gemini/gemini-3.5-flash
+  model: openai/gpt-5.6-luna
 
 search:
   # The configured Serper credential is currently unauthorized (HTTP 403).
   # Use Gemini Google Search grounding directly for reliable live research.
   provider: gemini
+  model: gemini-3.5-flash
 
 crew:
   verbose: true

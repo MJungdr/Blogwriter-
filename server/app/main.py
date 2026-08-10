@@ -28,6 +28,14 @@ from crewai import Agent, Task, Crew, LLM
 from crewai.tools import BaseTool
 from crewai_tools import SerperDevTool
 
+from .editorial_prompts import (
+    AUDIENCE_AND_STYLE,
+    EDITORIAL_QUALITY_CHECK,
+    PLANNING_RULES,
+    SOURCING_AND_SAFETY,
+    WRITING_RULES,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +67,18 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
         with open(path, "r", encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
 
+    # Defaults with overrides
+    app_cfg = config.get("app", {})
+    llm_cfg = config.get("llm", {})
+    crew_cfg = config.get("crew", {})
+
     # Required env validation
     missing = []
     if not os.getenv("GOOGLE_API_KEY"):
         missing.append("GOOGLE_API_KEY")
+    llm_model = llm_cfg.get("model", "openai/gpt-5.6-luna")
+    if llm_model.startswith("openai/") and not os.getenv("OPENAI_API_KEY"):
+        missing.append("OPENAI_API_KEY")
     search_provider = os.getenv("SEARCH_PROVIDER", config.get("search", {}).get("provider", "auto")).lower()
     if search_provider not in {"auto", "serper", "gemini"}:
         raise RuntimeError("SEARCH_PROVIDER must be one of: auto, serper, gemini")
@@ -70,11 +86,6 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
         missing.append("SERPER_API_KEY")
     if missing:
         raise RuntimeError(f"Missing environment variables: {', '.join(missing)}")
-
-    # Defaults with overrides
-    app_cfg = config.get("app", {})
-    llm_cfg = config.get("llm", {})
-    crew_cfg = config.get("crew", {})
 
     return {
         "host": app_cfg.get("host", "127.0.0.1"),
@@ -84,9 +95,10 @@ def load_config(path: str = DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
             "cors_origin_regex",
             r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
         ),
-        "llm_model": llm_cfg.get("model", "gemini/gemini-3.5-flash"),
+        "llm_model": llm_model,
         "crew_verbose": crew_cfg.get("verbose", True),
         "search_provider": search_provider,
+        "search_model": config.get("search", {}).get("model", "gemini-3.5-flash"),
     }
 
 
@@ -416,24 +428,28 @@ def generate_topic_image(topic: str) -> str:
 
 # Crew builder (unchanged from notebook)
 def build_crew() -> Crew:
+    llm_api_key = (
+        os.getenv("OPENAI_API_KEY")
+        if settings["llm_model"].startswith("openai/")
+        else os.getenv("GOOGLE_API_KEY")
+    )
     llm = LLM(
-        api_key=os.getenv("GOOGLE_API_KEY"),
+        api_key=llm_api_key,
         model=settings["llm_model"],
     )
     # CrewAI's Gemini native function-calling path can return an empty text response
     # after a tool call because the agent executor uses its own ReAct tool loop.
     # Keep tool execution in that loop so each observation is fed back to the model.
-    if hasattr(llm, "supports_tools"):
+    if settings["llm_model"].startswith("gemini/") and hasattr(llm, "supports_tools"):
         llm.supports_tools = False
 
     planner = Agent(
         role="Content Planner",
-        goal="Plan engaging and factually accurate content on {topic}",
+        goal="Plan a focused, practical, evidence-based WordPress article on {topic}",
         backstory=(
-            "You're working on planning a blog article about the topic: {topic} in 'https://medium.com/'. "
-            "You collect information that helps the audience learn something and make informed decisions. "
-            "Prepare a detailed outline and the relevant topics and sub-topics for the blog post. "
-            "Your work is the basis for the Content Writer."
+            "You plan English articles for BlogGPT's AI & Research category. Your work is the basis for the "
+            "Content Writer.\n\n"
+            f"{AUDIENCE_AND_STYLE}\n\n{SOURCING_AND_SAFETY}"
         ),
         allow_delegation=False,
         verbose=settings["crew_verbose"],
@@ -442,11 +458,11 @@ def build_crew() -> Crew:
 
     writer = Agent(
         role="Content Writer",
-        goal="Write insightful and factually accurate opinion piece about the topic: {topic}",
+        goal="Write a practical, readable, source-grounded WordPress article about {topic}",
         backstory=(
-            "You're writing a new opinion piece about the topic: {topic} in 'https://medium.com/'. "
-            "You base your writing on the Content Planner's outline, provide objective insights, and "
-            "acknowledge when statements are opinions."
+            "You write English articles for BlogGPT's AI & Research category. You help researchers turn a "
+            "concept into a workflow they can understand, assess, and try.\n\n"
+            f"{AUDIENCE_AND_STYLE}\n\n{SOURCING_AND_SAFETY}\n\n{WRITING_RULES}"
         ),
         allow_delegation=False,
         verbose=settings["crew_verbose"],
@@ -456,11 +472,11 @@ def build_crew() -> Crew:
     editor = Agent(
         role="Editor",
         goal=(
-            "Edit a given blog post to align with the writing style of the organization 'https://medium.com/'."
+            "Edit a BlogGPT WordPress article for practical clarity, scientific care, and reader usefulness."
         ),
         backstory=(
-            "You review the blog post to ensure journalistic best practices, balanced viewpoints, and avoidance "
-            "of major controversial topics when possible."
+            "You are a rigorous but reader-centred editor for an AI & Research blog.\n\n"
+            f"{AUDIENCE_AND_STYLE}\n\n{SOURCING_AND_SAFETY}\n\n{EDITORIAL_QUALITY_CHECK}"
         ),
         allow_delegation=False,
         verbose=settings["crew_verbose"],
@@ -472,8 +488,9 @@ def build_crew() -> Crew:
             "Today is {current_date}. Use the mandatory live-research packet below as the factual baseline.\n"
             "LIVE RESEARCH:\n{research}\n\n"
             "1. Prioritize the latest verified trends, key players, and noteworthy news on {topic}.\n"
-            "2. Identify the target audience, considering their interests and pain points.\n"
-            "3. Develop a detailed content outline including an introduction, key points, and a call to action.\n"
+            "2. Identify the target audience, their science/software baseline, interests, and pain points.\n"
+            "3. Develop a detailed, connected outline including an introduction, key points, practical example, "
+            "limitations, and a clear call to action.\n"
 
             "4. Build an evidence ledger that maps every proposed factual claim, statistic, clinical or "
             "scientific statement, current event, and attributed point of view to at least one source.\n"
@@ -481,11 +498,13 @@ def build_crew() -> Crew:
             "Prefer primary sources (original studies, official datasets, regulators, company filings, and direct "
             "statements); use reputable journalism for context or when no primary source is available.\n"
             "6. Include SEO keywords. Treat older model knowledge as stale whenever it conflicts with dated live "
-            "research. Omit claims that cannot be supported by a source in the research packet."
+            "research. Omit claims that cannot be supported by a source in the research packet.\n\n"
+            f"{PLANNING_RULES}"
 
         ),
         expected_output=(
-            "A comprehensive content plan with outline, audience analysis, SEO keywords, and resources."
+            "A focused content plan with reader intent, keyword brief, connected outline, evidence ledger, scope "
+            "classification, researcher workflow, and internal-link/content-cluster opportunities."
         ),
         agent=planner,
 
@@ -494,10 +513,8 @@ def build_crew() -> Crew:
     write_task = Task(
         description=(
             "Today is {current_date}. Use the content plan and its live sources to craft a compelling blog post on {topic}.\n"
-            "2. Incorporate SEO keywords naturally.\n"
-            "3. Sections/Subtitles are properly named in an engaging manner.\n"
-            "4. Ensure the post has an engaging introduction, insightful body, and a summarizing conclusion.\n"
-            "5. Proofread for grammatical errors and alignment with the brand's voice.\n"
+            "1. Follow the planned reader journey and incorporate SEO keywords naturally.\n"
+            "2. Use the WordPress article contract below; do not expose the internal plan or classification labels.\n"
             "6. Cite every externally verifiable factual claim immediately after the sentence or paragraph using "
             "Markdown links, for example ([WHO](https://example.org/report)). This includes numbers, dates, "
             "comparisons, clinical/scientific findings, quotations, news, and claims about people or organizations.\n"
@@ -508,11 +525,12 @@ def build_crew() -> Crew:
             "or author, publication date when available, and a clickable direct URL. Every inline citation must "
             "appear in References, and every References entry must be cited in the article. Never invent a citation, "
             "title, date, author, or URL. Omit unsupported claims.\n"
-            "9. Preserve dates and source links. Do not replace current facts with older model knowledge."
+            "9. Preserve dates and source links. Do not replace current facts with older model knowledge.\n\n"
+            f"{WRITING_RULES}"
         ),
         expected_output=(
-            "A publication-ready Markdown blog post with 2-3 paragraphs per section, claim-level inline citations, "
-            "clearly identified evidence-backed viewpoints, and a complete References section."
+            "A publication-ready, reader-friendly WordPress Markdown article with claim-level inline citations, "
+            "a complete References section, and a compact final SEO Details block."
         ),
         agent=writer,
     )
@@ -526,12 +544,13 @@ def build_crew() -> Crew:
             "from analysis/opinion. Remove or qualify anything unsupported. Preserve verified dates and direct source "
             "URLs from the live research; never fabricate or guess bibliographic details. Ensure the final '## "
             "References' list is complete, deduplicated, and consistent with the inline citations. Do not introduce "
-            "unsupported facts or revert current facts to older model knowledge."
+            "unsupported facts or revert current facts to older model knowledge.\n\n"
+            f"{EDITORIAL_QUALITY_CHECK}"
         ),
         expected_output=(
             "A well-written blog post in markdown format (no leading word 'markdown'), ready for publication, "
-            "with 2-3 paragraphs per section, inline citations for every fact and point of view, and a complete "
-            "References section with clickable direct URLs."
+            "with readable sections, evidence-backed viewpoints, clickable inline citations, a complete References "
+            "section, and the final SEO Details block."
         ),
         agent=editor,
     )
@@ -549,7 +568,7 @@ def build_crew() -> Crew:
 def startup() -> None:
     app.state.search_tool = AutoSearchTool(
         provider=settings["search_provider"],
-        gemini_model=settings["llm_model"],
+        gemini_model=settings["search_model"],
     )
 
 

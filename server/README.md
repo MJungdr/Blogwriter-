@@ -10,16 +10,21 @@ This folder contains a uv-based FastAPI server that replicates the CrewAI multi-
 - Python 3.10 through 3.13 (Python 3.14 is not supported by CrewAI)
 - `uv` installed (Rust-based Python package manager)
 - API keys in environment:
+  - `OPENAI_API_KEY` (used by the planner, writer, and editor with GPT-5.6 Luna)
   - `GOOGLE_API_KEY`
   - `SERPER_API_KEY` (optional when `SEARCH_PROVIDER=auto` or `SEARCH_PROVIDER=gemini`)
 
 Create a `.env` file in this `server/` directory:
 
 ```
+OPENAI_API_KEY=your_openai_api_key
 GOOGLE_API_KEY=your_google_api_key
 SERPER_API_KEY=your_serper_api_key
 SEARCH_PROVIDER=auto
 ```
+
+The article-writing crew uses `gpt-5.6-luna`. Gemini remains configured for
+Google Search grounding and hero-image generation.
 
 Search provider modes:
 
