@@ -13,6 +13,10 @@ interface BlogResponse {
     };
 }
 
+export type GenerateBlogResult =
+    | { ok: true; data: BlogResponse }
+    | { ok: false; error: string };
+
 interface BackendHttpResponse {
     status: number;
     body: string;
@@ -40,6 +44,10 @@ const postToBackend = (topic: string): Promise<BackendHttpResponse> => {
                         body: Buffer.concat(chunks).toString("utf8"),
                     });
                 });
+                backendResponse.on("error", reject);
+                backendResponse.on("aborted", () => {
+                    reject(new Error("The backend closed the generation connection before responding"));
+                });
             },
         );
 
@@ -59,7 +67,7 @@ const isConnectionReset = (error: unknown): boolean => {
     return code === "ECONNRESET" || code === "ECONNREFUSED";
 };
 
-export const generateBlog = async (topic: string): Promise<BlogResponse> => {
+export const generateBlog = async (topic: string): Promise<GenerateBlogResult> => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
         const startedAt = Date.now();
         try {
@@ -75,9 +83,9 @@ export const generateBlog = async (topic: string): Promise<BlogResponse> => {
                 } catch {
                     // Keep the status-based message when the backend did not return JSON.
                 }
-                throw new Error(message);
+                return { ok: false, error: message };
             }
-            return JSON.parse(response.body) as BlogResponse;
+            return { ok: true, data: JSON.parse(response.body) as BlogResponse };
         } catch (error) {
             const failedEarly = Date.now() - startedAt < EARLY_RESET_RETRY_WINDOW_MS;
             if (attempt === 0 && failedEarly && isConnectionReset(error)) {
@@ -85,10 +93,19 @@ export const generateBlog = async (topic: string): Promise<BlogResponse> => {
                 await new Promise((resolve) => setTimeout(resolve, 750));
                 continue;
             }
-            console.error(error);
-            throw error;
+            console.error("Blog generation request failed", error);
+            return {
+                ok: false,
+                error:
+                    error instanceof Error
+                        ? error.message
+                        : "The blog generation request failed unexpectedly",
+            };
         }
     }
 
-    throw new Error("Backend request failed after retry");
+    return {
+        ok: false,
+        error: "The backend could not be reached after retrying once",
+    };
 };

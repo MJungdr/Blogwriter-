@@ -49,7 +49,12 @@ const BlogGeneratorPage: React.FC = () => {
     setMarkdownDownloaded(false);
 
     try {
-      const blogData = await generateBlog(topic);
+      const generation = await generateBlog(topic);
+      if (!generation.ok) {
+        setError(generation.error);
+        return;
+      }
+      const blogData = generation.data;
       const cleanedBlog = blogData.blog.raw
         .replace(/^```markdown\n/, "") // Remove the opening ```markdown
         .replace(/\n```$/, "") // Remove the closing ```

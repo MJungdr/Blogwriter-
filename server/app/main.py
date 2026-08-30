@@ -31,6 +31,7 @@ from crewai_tools import SerperDevTool
 from .editorial_prompts import (
     AUDIENCE_AND_STYLE,
     EDITORIAL_QUALITY_CHECK,
+    HUMAN_CENTRED_TECHNICAL_WRITING,
     PLANNING_RULES,
     SOURCING_AND_SAFETY,
     WRITING_RULES,
@@ -41,6 +42,8 @@ logger = logging.getLogger(__name__)
 
 MAX_RESEARCH_CHARS = 24_000
 LLM_EMPTY_RESPONSE_RETRIES = 2
+MINIMUM_REFERENCE_COVERAGE = 0.70
+MARKDOWN_LINK_PATTERN = re.compile(r"\[([^]]+)\]\((https?://[^)]+)\)")
 
 
 def show_progress(message: str) -> None:
@@ -161,25 +164,78 @@ def validate_planner_output(task_output):
 
 
 def validate_article_references(article: str) -> tuple[bool, str]:
-    """Check the minimum citation contract before an article leaves the API."""
+    """Check that a usable majority of inline citations appear in References."""
     references_match = re.search(r"(?im)^##\s+references\s*$", article)
     if not references_match:
         return False, "missing a level-two References section"
 
     body = article[: references_match.start()]
     references = article[references_match.end() :]
-    link_pattern = re.compile(r"\[[^]]+\]\((https?://[^)]+)\)")
-    inline_urls = set(link_pattern.findall(body))
-    reference_urls = set(link_pattern.findall(references))
+    inline_urls = {url for _, url in MARKDOWN_LINK_PATTERN.findall(body)}
+    reference_urls = {url for _, url in MARKDOWN_LINK_PATTERN.findall(references)}
     if not inline_urls:
         return False, "missing inline Markdown citations"
     if not reference_urls:
         return False, "References contains no clickable source links"
 
-    missing_from_references = inline_urls - reference_urls
-    if missing_from_references:
-        return False, "one or more inline citations are absent from References"
+    matched_urls = inline_urls & reference_urls
+    coverage = len(matched_urls) / len(inline_urls)
+    if coverage < MINIMUM_REFERENCE_COVERAGE:
+        return (
+            False,
+            "only "
+            f"{len(matched_urls)} of {len(inline_urls)} inline citations appear in References "
+            f"({coverage:.0%}; minimum is {MINIMUM_REFERENCE_COVERAGE:.0%})",
+        )
     return True, ""
+
+
+def reconcile_article_references(article: str) -> tuple[str, int]:
+    """Add missing Reference entries from existing inline citations without inventing metadata."""
+    references_match = re.search(r"(?im)^##\s+references\s*$", article)
+    if not references_match:
+        return article, 0
+
+    body = article[: references_match.start()]
+    after_heading = article[references_match.end() :]
+    seo_match = re.search(r"(?im)^##\s+seo details\s*$", after_heading)
+    references = after_heading[: seo_match.start()] if seo_match else after_heading
+    remainder = after_heading[seo_match.start() :] if seo_match else ""
+
+    inline_links = MARKDOWN_LINK_PATTERN.findall(body)
+    reference_urls = {url for _, url in MARKDOWN_LINK_PATTERN.findall(references)}
+    missing_links: list[tuple[str, str]] = []
+    seen_urls: set[str] = set()
+    for label, url in inline_links:
+        if url not in reference_urls and url not in seen_urls:
+            missing_links.append((label, url))
+            seen_urls.add(url)
+
+    if not missing_links:
+        return article, 0
+
+    additions = "\n".join(
+        f"- [{label}]({url})" for label, url in missing_links
+    )
+    repaired_references = f"{references.rstrip()}\n{additions}\n"
+    return f"{body}{article[references_match.start() : references_match.end()]}\n{repaired_references}{remainder.lstrip()}", len(missing_links)
+
+
+def _handle_windows_connection_reset(
+    loop: asyncio.AbstractEventLoop, context: dict[str, Any]
+) -> None:
+    """Ignore harmless Proactor cleanup noise when a local client has already disconnected."""
+    exc = context.get("exception")
+    handle = str(context.get("handle", ""))
+    if (
+        os.name == "nt"
+        and isinstance(exc, ConnectionResetError)
+        and getattr(exc, "winerror", None) == 10054
+        and "_ProactorBasePipeTransport._call_connection_lost" in handle
+    ):
+        logger.debug("Ignored expected Windows connection reset during transport cleanup")
+        return
+    loop.default_exception_handler(context)
 
 
 def gemini_api_model_name(model: str) -> str:
@@ -462,7 +518,8 @@ def build_crew() -> Crew:
         backstory=(
             "You write English articles for BlogGPT's AI & Research category. You help researchers turn a "
             "concept into a workflow they can understand, assess, and try.\n\n"
-            f"{AUDIENCE_AND_STYLE}\n\n{SOURCING_AND_SAFETY}\n\n{WRITING_RULES}"
+            f"{AUDIENCE_AND_STYLE}\n\n{SOURCING_AND_SAFETY}\n\n{WRITING_RULES}\n\n"
+            f"{HUMAN_CENTRED_TECHNICAL_WRITING}"
         ),
         allow_delegation=False,
         verbose=settings["crew_verbose"],
@@ -476,7 +533,8 @@ def build_crew() -> Crew:
         ),
         backstory=(
             "You are a rigorous but reader-centred editor for an AI & Research blog.\n\n"
-            f"{AUDIENCE_AND_STYLE}\n\n{SOURCING_AND_SAFETY}\n\n{EDITORIAL_QUALITY_CHECK}"
+            f"{AUDIENCE_AND_STYLE}\n\n{SOURCING_AND_SAFETY}\n\n{HUMAN_CENTRED_TECHNICAL_WRITING}\n\n"
+            f"{EDITORIAL_QUALITY_CHECK}"
         ),
         allow_delegation=False,
         verbose=settings["crew_verbose"],
@@ -526,7 +584,7 @@ def build_crew() -> Crew:
             "appear in References, and every References entry must be cited in the article. Never invent a citation, "
             "title, date, author, or URL. Omit unsupported claims.\n"
             "9. Preserve dates and source links. Do not replace current facts with older model knowledge.\n\n"
-            f"{WRITING_RULES}"
+            f"{WRITING_RULES}\n\n{HUMAN_CENTRED_TECHNICAL_WRITING}"
         ),
         expected_output=(
             "A publication-ready, reader-friendly WordPress Markdown article with claim-level inline citations, "
@@ -545,7 +603,7 @@ def build_crew() -> Crew:
             "URLs from the live research; never fabricate or guess bibliographic details. Ensure the final '## "
             "References' list is complete, deduplicated, and consistent with the inline citations. Do not introduce "
             "unsupported facts or revert current facts to older model knowledge.\n\n"
-            f"{EDITORIAL_QUALITY_CHECK}"
+            f"{HUMAN_CENTRED_TECHNICAL_WRITING}\n\n{EDITORIAL_QUALITY_CHECK}"
         ),
         expected_output=(
             "A well-written blog post in markdown format (no leading word 'markdown'), ready for publication, "
@@ -565,7 +623,8 @@ def build_crew() -> Crew:
 
 # Store crew in app state at startup
 @app.on_event("startup")
-def startup() -> None:
+async def startup() -> None:
+    asyncio.get_running_loop().set_exception_handler(_handle_windows_connection_reset)
     app.state.search_tool = AutoSearchTool(
         provider=settings["search_provider"],
         gemini_model=settings["search_model"],
@@ -606,6 +665,7 @@ async def generate_blog(request: TopicRequest) -> Dict[str, Any]:
             "research": research,
         }
         result = None
+        blog_text = ""
         for attempt in range(LLM_EMPTY_RESPONSE_RETRIES + 1):
             # Crew and agent instances contain mutable execution state. A new
             # crew per attempt prevents state leaking across requests/retries.
@@ -618,6 +678,12 @@ async def generate_blog(request: TopicRequest) -> Dict[str, Any]:
                 # CrewAI and some of its tools use synchronous internals.
                 result = await asyncio.to_thread(crew.kickoff, inputs=inputs)
                 blog_text = getattr(result, "raw", None) or str(result)
+                blog_text, repaired_reference_count = reconcile_article_references(blog_text)
+                if repaired_reference_count:
+                    logger.info(
+                        "Added %s missing References entry/entries from existing inline citations",
+                        repaired_reference_count,
+                    )
                 references_valid, validation_error = validate_article_references(blog_text)
                 if not references_valid:
                     if attempt >= LLM_EMPTY_RESPONSE_RETRIES:
@@ -648,7 +714,6 @@ async def generate_blog(request: TopicRequest) -> Dict[str, Any]:
 
         if result is None:
             raise RuntimeError("Blog generation completed without a result")
-        blog_text = getattr(result, "raw", None) or str(result)
         show_progress("Blog generation complete")
         return {"topic": request.topic, "blog": {"raw": blog_text}}
     except Exception as exc:

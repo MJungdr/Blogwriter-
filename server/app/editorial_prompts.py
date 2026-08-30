@@ -38,8 +38,21 @@ WORDPRESS ARTICLE CONTRACT
 """.strip()
 
 
+HUMAN_CENTRED_TECHNICAL_WRITING = """
+HUMAN-CENTRED TECHNICAL WRITING
+- Open with a specific reader problem and practical consequence. Do not begin with generic claims about rapid change, transformation, or importance.
+- Make every section earn its place: it must add evidence, an explanation, a decision, a practical workflow, or a clearly labelled point of view. Remove filler, repeated summaries, and rhetorical questions that do not move the article forward.
+- Take a clear, appropriately qualified editorial position when it helps the reader make a decision. Keep facts and analysis visibly distinct, and support both with the available evidence.
+- Use concrete examples only when they are supported by the research packet or clearly labelled as illustrative. Never present an invented anecdote, failure, quote, number, or user experience as real.
+- Mimi is an illustrative teaching scenario, not a reported person or case study. Never imply that her experience is factual evidence.
+- Vary paragraph functions and sentence openings naturally. Keep clear professional prose; do not force casualness or over-edit ordinary sentences merely to sound less like AI.
+""".strip()
+
+
 EDITORIAL_QUALITY_CHECK = """
 FINAL EDITORIAL CHECK
+- Before editing, identify generic openings, filler, repeated conclusions, unsupported specificity, and template-like rhythm. Then make only the smallest edits needed to resolve the issues.
+- Preserve the author's voice, article structure, and verified inline citations. Do not rewrite ordinary clear prose solely to make it sound less like AI.
 - Confirm that the search intent, intended researcher audience, focus keyword, and next action are clear.
 - Ensure technical ideas are explained before use; keep only material that serves the central intent and move advanced tangents to suggested support articles.
 - Check for a concrete researcher workflow, natural transitions, varied openings, limited passive voice, short readable paragraphs, and no templated or hype-driven language.
