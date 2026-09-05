@@ -6,8 +6,16 @@ const BACKEND_URL = "http://127.0.0.1:8002/generate-blog/";
 const EARLY_RESET_RETRY_WINDOW_MS = 10_000;
 const GENERATION_TIMEOUT_MS = 20 * 60 * 1_000;
 
+export type ArticleType =
+    | "auto"
+    | "biomedical_science"
+    | "ai_research_tools"
+    | "global_life";
+
 interface BlogResponse {
     topic: string;
+    requested_article_type: ArticleType;
+    article_type: Exclude<ArticleType, "auto">;
     blog: {
         raw: string;
     };
@@ -22,8 +30,8 @@ interface BackendHttpResponse {
     body: string;
 }
 
-const postToBackend = (topic: string): Promise<BackendHttpResponse> => {
-    const payload = JSON.stringify({ topic });
+const postToBackend = (topic: string, articleType: ArticleType): Promise<BackendHttpResponse> => {
+    const payload = JSON.stringify({ topic, article_type: articleType });
 
     return new Promise((resolve, reject) => {
         const backendRequest = request(
@@ -67,11 +75,14 @@ const isConnectionReset = (error: unknown): boolean => {
     return code === "ECONNRESET" || code === "ECONNREFUSED";
 };
 
-export const generateBlog = async (topic: string): Promise<GenerateBlogResult> => {
+export const generateBlog = async (
+    topic: string,
+    articleType: ArticleType,
+): Promise<GenerateBlogResult> => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
         const startedAt = Date.now();
         try {
-            const response = await postToBackend(topic);
+            const response = await postToBackend(topic, articleType);
 
             if (response.status < 200 || response.status >= 300) {
                 let message = `Backend request failed (${response.status})`;

@@ -8,7 +8,7 @@ import os
 import re
 from datetime import date
 from io import BytesIO
-from typing import Any, Dict
+from typing import Any, Dict, Literal
 from urllib.parse import quote
 
 from docx import Document
@@ -29,12 +29,9 @@ from crewai.tools import BaseTool
 from crewai_tools import SerperDevTool
 
 from .editorial_prompts import (
-    AUDIENCE_AND_STYLE,
     EDITORIAL_QUALITY_CHECK,
-    HUMAN_CENTRED_TECHNICAL_WRITING,
-    PLANNING_RULES,
-    SOURCING_AND_SAFETY,
-    WRITING_RULES,
+    TOPIC_ROUTER,
+    prompt_for_article_type,
 )
 
 
@@ -124,6 +121,7 @@ app.add_middleware(
 
 class TopicRequest(BaseModel):
     topic: str
+    article_type: Literal["auto", "biomedical_science", "ai_research_tools", "global_life"] = "auto"
 
 
 class DocumentRequest(BaseModel):
@@ -163,18 +161,22 @@ def validate_planner_output(task_output):
     return True, output
 
 
-def validate_article_references(article: str) -> tuple[bool, str]:
+def validate_article_references(article: str, require_citations: bool = True) -> tuple[bool, str]:
     """Check that a usable majority of inline citations appear in References."""
     references_match = re.search(r"(?im)^##\s+references\s*$", article)
     if not references_match:
-        return False, "missing a level-two References section"
+        if require_citations:
+            return False, "missing a level-two References section"
+        return True, ""
 
     body = article[: references_match.start()]
     references = article[references_match.end() :]
     inline_urls = {url for _, url in MARKDOWN_LINK_PATTERN.findall(body)}
     reference_urls = {url for _, url in MARKDOWN_LINK_PATTERN.findall(references)}
     if not inline_urls:
-        return False, "missing inline Markdown citations"
+        if require_citations:
+            return False, "missing inline Markdown citations"
+        return True, ""
     if not reference_urls:
         return False, "References contains no clickable source links"
 
@@ -457,13 +459,14 @@ def build_article_docx(request: DocumentRequest) -> BytesIO:
     return output
 
 
-def generate_topic_image(topic: str) -> str:
+def generate_topic_image(topic: str, article_type: str = "auto") -> str:
     client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
     interaction = client.interactions.create(
         model="gemini-3.1-flash-image",
         input=(
             "Create a polished, editorial-quality 16:9 hero image for a blog "
-            f"article about: {topic}. Do not include logos, watermarks, or text."
+            f"article in the {article_type} category about: {topic}. Match the category's visual context. "
+            "Do not include logos, watermarks, or text."
         ),
         response_format={
             "type": "image",
@@ -482,8 +485,50 @@ def generate_topic_image(topic: str) -> str:
     return f"{image.mime_type or 'image/jpeg'};base64,{encoded}"
 
 
-# Crew builder (unchanged from notebook)
-def build_crew() -> Crew:
+def resolve_article_type(topic: str, requested_type: str) -> str:
+    """Respect an explicit selection or classify one dominant mode before research."""
+    if requested_type != "auto":
+        return requested_type
+
+    llm_api_key = (
+        os.getenv("OPENAI_API_KEY")
+        if settings["llm_model"].startswith("openai/")
+        else os.getenv("GOOGLE_API_KEY")
+    )
+    llm = LLM(api_key=llm_api_key, model=settings["llm_model"])
+    if settings["llm_model"].startswith("gemini/") and hasattr(llm, "supports_tools"):
+        llm.supports_tools = False
+
+    router = Agent(
+        role="Article Type Router",
+        goal="Select one dominant BlogGPT article type before research begins.",
+        backstory=TOPIC_ROUTER,
+        allow_delegation=False,
+        verbose=settings["crew_verbose"],
+        llm=llm,
+    )
+    route_task = Task(
+        description=(
+            "Classify this proposed article topic: {topic}\n\n"
+            "Return exactly one value and nothing else: biomedical_science, ai_research_tools, or global_life. "
+            "For a hybrid topic, use the dominant mode specified by the routing rules."
+        ),
+        expected_output="Exactly one permitted article-type value.",
+        agent=router,
+    )
+    result = Crew(agents=[router], tasks=[route_task], verbose=settings["crew_verbose"]).kickoff(
+        inputs={"topic": topic}
+    )
+    normalized = str(result).lower()
+    for article_type in ("biomedical_science", "ai_research_tools", "global_life"):
+        if article_type in normalized:
+            return article_type
+    logger.warning("Article router returned an unrecognized result; defaulting to AI tools: %r", normalized)
+    return "ai_research_tools"
+
+
+# Crew builder
+def build_crew(article_type: str) -> Crew:
     llm_api_key = (
         os.getenv("OPENAI_API_KEY")
         if settings["llm_model"].startswith("openai/")
@@ -499,13 +544,14 @@ def build_crew() -> Crew:
     if settings["llm_model"].startswith("gemini/") and hasattr(llm, "supports_tools"):
         llm.supports_tools = False
 
+    editorial_prompt = prompt_for_article_type(article_type)
+
     planner = Agent(
         role="Content Planner",
         goal="Plan a focused, practical, evidence-based WordPress article on {topic}",
         backstory=(
-            "You plan English articles for BlogGPT's AI & Research category. Your work is the basis for the "
-            "Content Writer.\n\n"
-            f"{AUDIENCE_AND_STYLE}\n\n{SOURCING_AND_SAFETY}"
+            "You plan English articles for BlogGPT. Your work is the basis for the Content Writer.\n\n"
+            f"{editorial_prompt}"
         ),
         allow_delegation=False,
         verbose=settings["crew_verbose"],
@@ -516,10 +562,8 @@ def build_crew() -> Crew:
         role="Content Writer",
         goal="Write a practical, readable, source-grounded WordPress article about {topic}",
         backstory=(
-            "You write English articles for BlogGPT's AI & Research category. You help researchers turn a "
-            "concept into a workflow they can understand, assess, and try.\n\n"
-            f"{AUDIENCE_AND_STYLE}\n\n{SOURCING_AND_SAFETY}\n\n{WRITING_RULES}\n\n"
-            f"{HUMAN_CENTRED_TECHNICAL_WRITING}"
+            "You write English articles for BlogGPT. Follow the selected topic mode exactly.\n\n"
+            f"{editorial_prompt}"
         ),
         allow_delegation=False,
         verbose=settings["crew_verbose"],
@@ -529,11 +573,11 @@ def build_crew() -> Crew:
     editor = Agent(
         role="Editor",
         goal=(
-            "Edit a BlogGPT WordPress article for practical clarity, scientific care, and reader usefulness."
+            "Edit a BlogGPT WordPress article for practical clarity and reader usefulness."
         ),
         backstory=(
-            "You are a rigorous but reader-centred editor for an AI & Research blog.\n\n"
-            f"{AUDIENCE_AND_STYLE}\n\n{SOURCING_AND_SAFETY}\n\n{HUMAN_CENTRED_TECHNICAL_WRITING}\n\n"
+            "You are a rigorous but reader-centred editor for BlogGPT.\n\n"
+            f"{editorial_prompt}\n\n"
             f"{EDITORIAL_QUALITY_CHECK}"
         ),
         allow_delegation=False,
@@ -545,24 +589,27 @@ def build_crew() -> Crew:
         description=(
             "Today is {current_date}. Use the mandatory live-research packet below as the factual baseline.\n"
             "LIVE RESEARCH:\n{research}\n\n"
-            "1. Prioritize the latest verified trends, key players, and noteworthy news on {topic}.\n"
-            "2. Identify the target audience, their science/software baseline, interests, and pain points.\n"
-            "3. Develop a detailed, connected outline including an introduction, key points, practical example, "
-            "limitations, and a clear call to action.\n"
+            "1. Prioritize current, relevant, and verifiable information on {topic}; do not force news or trends "
+            "when they are not central to the reader's intent.\n"
+            "2. Identify the target audience, their relevant baseline, interests, and pain points.\n"
+            "3. Develop a detailed, connected outline including an introduction, key points, a practical example "
+            "only when useful, balanced limitations or open questions, and a clear call to action.\n"
 
-            "4. Build an evidence ledger that maps every proposed factual claim, statistic, clinical or "
+            "4. Build an internal evidence ledger that maps every proposed factual claim, statistic, clinical or "
             "scientific statement, current event, and attributed point of view to at least one source.\n"
             "5. For each source record its title, publisher/author, publication date when available, and direct URL. "
             "Prefer primary sources (original studies, official datasets, regulators, company filings, and direct "
             "statements); use reputable journalism for context or when no primary source is available.\n"
             "6. Include SEO keywords. Treat older model knowledge as stale whenever it conflicts with dated live "
             "research. Omit claims that cannot be supported by a source in the research packet.\n\n"
-            f"{PLANNING_RULES}"
+            "Apply the selected topic mode. Keep the evidence ledger internal; it must never become a reader-facing "
+            "evidence-matrix tutorial."
 
         ),
         expected_output=(
-            "A focused content plan with reader intent, keyword brief, connected outline, evidence ledger, scope "
-            "classification, researcher workflow, and internal-link/content-cluster opportunities."
+            "A focused content plan with reader intent, keyword brief, connected outline, internal evidence ledger, "
+            "scope classification, topic-appropriate reader aid (workflow, example, or comparison), and "
+            "internal-link/content-cluster opportunities."
         ),
         agent=planner,
 
@@ -572,43 +619,44 @@ def build_crew() -> Crew:
         description=(
             "Today is {current_date}. Use the content plan and its live sources to craft a compelling blog post on {topic}.\n"
             "1. Follow the planned reader journey and incorporate SEO keywords naturally.\n"
-            "2. Use the WordPress article contract below; do not expose the internal plan or classification labels.\n"
-            "6. Cite every externally verifiable factual claim immediately after the sentence or paragraph using "
-            "Markdown links, for example ([WHO](https://example.org/report)). This includes numbers, dates, "
-            "comparisons, clinical/scientific findings, quotations, news, and claims about people or organizations.\n"
+            "2. Use the WordPress article contract below; do not expose the internal plan, evidence ledger, or "
+            "classification labels. Include workflows, tutorials, checklists, examples, and safety sections only "
+            "when they directly serve the topic.\n"
+            "6. Apply the selected topic mode's sourcing rules. For biomedical and AI research articles, cite every "
+            "externally verifiable factual claim immediately after the sentence or paragraph using Markdown links. "
+            "For Global Life articles, cite only factual information readers may rely on; never cite or invent "
+            "personal observations.\n"
             "7. Clearly label analysis and opinions with phrasing such as 'In my view' or 'This suggests'. Support "
             "each point of view with links to the evidence, reporting, expert commentary, or data it interprets; do "
             "not present an opinion as settled fact.\n"
-            "8. End with a '## References' section containing one bullet per cited source: source title, publisher "
-            "or author, publication date when available, and a clickable direct URL. Every inline citation must "
-            "appear in References, and every References entry must be cited in the article. Never invent a citation, "
-            "title, date, author, or URL. Omit unsupported claims.\n"
+            "8. When the article uses external sources, end with a '## References' section containing one bullet "
+            "per cited source: source title, publisher or author, publication date when available, and a clickable "
+            "direct URL. Every inline citation must appear in References, and every References entry must be cited "
+            "in the article. Never invent a citation, title, date, author, or URL. Omit unsupported claims.\n"
             "9. Preserve dates and source links. Do not replace current facts with older model knowledge.\n\n"
-            f"{WRITING_RULES}\n\n{HUMAN_CENTRED_TECHNICAL_WRITING}"
+            f"{editorial_prompt}"
         ),
         expected_output=(
-            "A publication-ready, reader-friendly WordPress Markdown article with claim-level inline citations, "
-            "a complete References section, and a compact final SEO Details block."
+            "A publication-ready, reader-friendly WordPress Markdown article with citations and References where "
+            "the selected topic mode calls for them, and a compact final SEO Details block."
         ),
         agent=writer,
     )
 
     edit_task = Task(
         description=(
-            "Today is {current_date}. Proofread the given blog post for grammatical errors and alignment "
-            "with the brand's voice. Perform a final citation audit sentence by sentence. Every factual claim, "
-            "statistic, clinical/scientific statement, quotation, news item, and attributed or author point of view "
-            "must have a nearby Markdown citation to a source that actually supports it. Clearly distinguish facts "
-            "from analysis/opinion. Remove or qualify anything unsupported. Preserve verified dates and direct source "
-            "URLs from the live research; never fabricate or guess bibliographic details. Ensure the final '## "
-            "References' list is complete, deduplicated, and consistent with the inline citations. Do not introduce "
-            "unsupported facts or revert current facts to older model knowledge.\n\n"
-            f"{HUMAN_CENTRED_TECHNICAL_WRITING}\n\n{EDITORIAL_QUALITY_CHECK}"
+            "Today is {current_date}. Proofread the given blog post for grammatical errors and alignment with the "
+            "brand's voice. Perform the citation audit required by the selected topic mode. Clearly distinguish "
+            "facts from analysis/opinion. Remove or qualify anything unsupported. Preserve verified dates and direct "
+            "source URLs from the live research; never fabricate or guess bibliographic details. Ensure the final "
+            "'## References' list is complete, deduplicated, and consistent with the inline citations when sources "
+            "are used. Do not introduce unsupported facts or revert current facts to older model knowledge.\n\n"
+            f"{editorial_prompt}\n\n{EDITORIAL_QUALITY_CHECK}"
         ),
         expected_output=(
             "A well-written blog post in markdown format (no leading word 'markdown'), ready for publication, "
-            "with readable sections, evidence-backed viewpoints, clickable inline citations, a complete References "
-            "section, and the final SEO Details block."
+            "with readable, topic-appropriate sections, evidence-backed viewpoints, citations and References where "
+            "the selected topic mode calls for them, and the final SEO Details block."
         ),
         agent=editor,
     )
@@ -638,13 +686,19 @@ async def generate_blog(request: TopicRequest) -> Dict[str, Any]:
 
     try:
         current_date = date.today().isoformat()
+        show_progress(f"Selecting article type for: {request.topic.strip()}")
+        resolved_article_type = await asyncio.to_thread(
+            resolve_article_type, request.topic.strip(), request.article_type
+        )
+        show_progress(f"Using article type: {resolved_article_type}")
         show_progress(f"Researching current information for: {request.topic.strip()}")
         research_query = (
-            f"As of {current_date}, research the latest verified facts and developments about: "
-            f"{request.topic.strip()}. Prioritize primary and reputable recent sources. Include exact dates, "
-            "current status, clinical or scientific studies, relevant datasets, contrasting expert viewpoints, "
-            "and related news. For every fact or viewpoint, identify the supporting source title, publisher/author, "
-            "publication date when available, and direct URL. Explicitly correct common outdated claims."
+            f"As of {current_date}, research the information needed for a {resolved_article_type} article about: "
+            f"{request.topic.strip()}. Prioritize primary, official, and reputable sources appropriate to that "
+            "article type. Include exact dates and current status for time-sensitive facts. For each factual claim "
+            "or viewpoint, identify the supporting source title, publisher/author, publication date when available, "
+            "and direct URL. For Global Life, focus research on practical facts readers may rely on and do not "
+            "attempt to manufacture personal experience."
         )
         research = await asyncio.to_thread(
             app.state.search_tool._run,
@@ -669,7 +723,7 @@ async def generate_blog(request: TopicRequest) -> Dict[str, Any]:
         for attempt in range(LLM_EMPTY_RESPONSE_RETRIES + 1):
             # Crew and agent instances contain mutable execution state. A new
             # crew per attempt prevents state leaking across requests/retries.
-            crew = build_crew()
+            crew = build_crew(resolved_article_type)
             try:
                 show_progress(
                     "Running planner, writer, and editor"
@@ -684,7 +738,10 @@ async def generate_blog(request: TopicRequest) -> Dict[str, Any]:
                         "Added %s missing References entry/entries from existing inline citations",
                         repaired_reference_count,
                     )
-                references_valid, validation_error = validate_article_references(blog_text)
+                references_valid, validation_error = validate_article_references(
+                    blog_text,
+                    require_citations=resolved_article_type != "global_life",
+                )
                 if not references_valid:
                     if attempt >= LLM_EMPTY_RESPONSE_RETRIES:
                         raise RuntimeError(
@@ -715,7 +772,12 @@ async def generate_blog(request: TopicRequest) -> Dict[str, Any]:
         if result is None:
             raise RuntimeError("Blog generation completed without a result")
         show_progress("Blog generation complete")
-        return {"topic": request.topic, "blog": {"raw": blog_text}}
+        return {
+            "topic": request.topic,
+            "requested_article_type": request.article_type,
+            "article_type": resolved_article_type,
+            "blog": {"raw": blog_text},
+        }
     except Exception as exc:
         logger.exception("Blog generation failed for topic %r", request.topic)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -728,7 +790,11 @@ async def generate_image(request: TopicRequest) -> Dict[str, str]:
         raise HTTPException(status_code=400, detail="'topic' must be provided")
 
     try:
-        image_data = await asyncio.to_thread(generate_topic_image, topic)
+        image_data = await asyncio.to_thread(
+            generate_topic_image,
+            topic,
+            request.article_type,
+        )
         return {"imageUrl": f"data:{image_data}"}
     except Exception as exc:
         logger.exception("Image generation failed for topic %r", topic)

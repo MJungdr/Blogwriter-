@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { generateBlog } from "./actions/generateBlog";
+import { generateBlog, type ArticleType } from "./actions/generateBlog";
 import BlogInputForm from "@/components/BlogInputForm";
 import InteractiveBlogLoader from "@/components/InteractiveBlogLoader";
 import {
@@ -29,6 +29,7 @@ const BlogGeneratorPage: React.FC = () => {
   const [blog, setBlog] = useState<string | null>(null);
   const [blogMarkdown, setBlogMarkdown] = useState<string>("");
   const [currentTopic, setCurrentTopic] = useState<string>("");
+  const [currentArticleType, setCurrentArticleType] = useState<ArticleType>("auto");
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,24 +38,26 @@ const BlogGeneratorPage: React.FC = () => {
   const [downloaded, setDownloaded] = useState<boolean>(false);
   const [markdownDownloaded, setMarkdownDownloaded] = useState<boolean>(false);
 
-  const handleGenerateBlog = async (topic: string) => {
+  const handleGenerateBlog = async (topic: string, articleType: ArticleType) => {
     setLoading(true);
     setError(null);
     setBlog(null);
     setBlogMarkdown("");
     setCurrentTopic(topic);
+    setCurrentArticleType(articleType);
     setImageUrl(null);
     setImageError(null);
     setDownloaded(false);
     setMarkdownDownloaded(false);
 
     try {
-      const generation = await generateBlog(topic);
+      const generation = await generateBlog(topic, articleType);
       if (!generation.ok) {
         setError(generation.error);
         return;
       }
       const blogData = generation.data;
+      setCurrentArticleType(blogData.article_type);
       const cleanedBlog = blogData.blog.raw
         .replace(/^```markdown\n/, "") // Remove the opening ```markdown
         .replace(/\n```$/, "") // Remove the closing ```
@@ -78,7 +81,10 @@ const BlogGeneratorPage: React.FC = () => {
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ topic }),
+            body: JSON.stringify({
+              topic,
+              article_type: blogData.article_type,
+            }),
           },
         );
         const imageData = await imageResponse.json();
@@ -100,6 +106,7 @@ const BlogGeneratorPage: React.FC = () => {
     setBlog(null);
     setBlogMarkdown("");
     setCurrentTopic("");
+    setCurrentArticleType("auto");
     setImageUrl(null);
     setImageError(null);
     setError(null);
@@ -182,6 +189,9 @@ const BlogGeneratorPage: React.FC = () => {
             <InteractiveBlogLoader />
           ) : blog ? (
             <div className="space-y-6">
+              <p className="text-sm text-neutral-500 dark:text-neutral-400">
+                Writing mode: {currentArticleType.replaceAll("_", " ")}
+              </p>
               <div className="mb-4 flex flex-wrap gap-3">
                 <Button variant="outline" onClick={handleReset}>
                   <ArrowLeft className="mr-2 h-4 w-4" /> Generate Another Blog
