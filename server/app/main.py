@@ -6,10 +6,14 @@ import binascii
 import logging
 import os
 import re
+import json
 from datetime import date
 from io import BytesIO
 from typing import Any, Dict, Literal
 from urllib.parse import quote
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -29,9 +33,9 @@ from crewai.tools import BaseTool
 from crewai_tools import SerperDevTool
 
 from .editorial_prompts import (
-    EDITORIAL_QUALITY_CHECK,
+    FINAL_QUALITY_CHECK,
     TOPIC_ROUTER,
-    prompt_for_article_type,
+    prompt_for_article,
 )
 
 
@@ -41,6 +45,8 @@ MAX_RESEARCH_CHARS = 24_000
 LLM_EMPTY_RESPONSE_RETRIES = 2
 MINIMUM_REFERENCE_COVERAGE = 0.70
 MARKDOWN_LINK_PATTERN = re.compile(r"\[([^]]+)\]\((https?://[^)]+)\)")
+UNSPLASH_SEARCH_PHOTOS_URL = "https://api.unsplash.com/search/photos"
+UNSPLASH_UTM_QUERY = "utm_source=bloggpt&utm_medium=referral"
 
 
 def show_progress(message: str) -> None:
@@ -121,7 +127,10 @@ app.add_middleware(
 
 class TopicRequest(BaseModel):
     topic: str
-    article_type: Literal["auto", "biomedical_science", "ai_research_tools", "global_life"] = "auto"
+    article_type: Literal["auto", "research", "ai_tool", "global_life", "hybrid"] = "auto"
+    mimi_example: Literal["auto", "include", "exclude"] = "auto"
+    workflow: Literal["auto", "include", "exclude"] = "auto"
+    my_view: Literal["auto", "include", "exclude"] = "auto"
 
 
 class DocumentRequest(BaseModel):
@@ -459,30 +468,63 @@ def build_article_docx(request: DocumentRequest) -> BytesIO:
     return output
 
 
-def generate_topic_image(topic: str, article_type: str = "auto") -> str:
-    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-    interaction = client.interactions.create(
-        model="gemini-3.1-flash-image",
-        input=(
-            "Create a polished, editorial-quality 16:9 hero image for a blog "
-            f"article in the {article_type} category about: {topic}. Match the category's visual context. "
-            "Do not include logos, watermarks, or text."
-        ),
-        response_format={
-            "type": "image",
-            "mime_type": "image/jpeg",
-            "aspect_ratio": "16:9",
-            "image_size": "1K",
+def _unsplash_referral_url(url: str) -> str:
+    """Add Unsplash's required referral parameters without dropping an existing query."""
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}{UNSPLASH_UTM_QUERY}"
+
+
+def generate_topic_image(topic: str) -> Dict[str, str]:
+    """Find the most relevant landscape Unsplash photo for the entered topic."""
+    access_key = os.getenv("UNSPLASH_ACCESS_KEY")
+    if not access_key:
+        raise RuntimeError(
+            "Unsplash is not configured. Add UNSPLASH_ACCESS_KEY to server/.env and restart BlogGPT."
+        )
+
+    # The article mode is editorial metadata, not an image-search term. Adding
+    # broad labels such as "global life" makes Unsplash return lifestyle images
+    # that can be unrelated to the reader's actual topic.
+    query = topic.strip()
+    request = Request(
+        f"{UNSPLASH_SEARCH_PHOTOS_URL}?{urlencode({
+            'query': query,
+            'orientation': 'landscape',
+            'content_filter': 'high',
+            'order_by': 'relevant',
+            'per_page': 1,
+        })}",
+        headers={
+            "Authorization": f"Client-ID {access_key}",
+            "Accept-Version": "v1",
         },
     )
-    image = interaction.output_image
-    if image is None or not image.data:
-        raise RuntimeError("Gemini returned no generated image")
+    try:
+        with urlopen(request, timeout=15) as response:
+            search_results = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        raise RuntimeError(f"Unsplash image request failed ({exc.code}).") from exc
+    except URLError as exc:
+        raise RuntimeError("Could not reach Unsplash. Check the network connection and try again.") from exc
 
-    encoded = image.data
-    if isinstance(encoded, bytes):
-        encoded = base64.b64encode(encoded).decode("ascii")
-    return f"{image.mime_type or 'image/jpeg'};base64,{encoded}"
+    photos = search_results.get("results", [])
+    if not photos:
+        raise RuntimeError(f"Unsplash found no landscape image for '{query}'. Please try a more specific topic.")
+
+    photo = photos[0]
+    image_url = photo.get("urls", {}).get("regular")
+    photographer = photo.get("user", {})
+    photographer_name = photographer.get("name")
+    photographer_url = photographer.get("links", {}).get("html")
+    if not image_url or not photographer_name or not photographer_url:
+        raise RuntimeError("Unsplash returned an incomplete photo result. Please try again.")
+
+    return {
+        "imageUrl": image_url,
+        "photographerName": photographer_name,
+        "photographerUrl": _unsplash_referral_url(photographer_url),
+        "unsplashUrl": _unsplash_referral_url("https://unsplash.com/"),
+    }
 
 
 def resolve_article_type(topic: str, requested_type: str) -> str:
@@ -510,7 +552,7 @@ def resolve_article_type(topic: str, requested_type: str) -> str:
     route_task = Task(
         description=(
             "Classify this proposed article topic: {topic}\n\n"
-            "Return exactly one value and nothing else: biomedical_science, ai_research_tools, or global_life. "
+            "Return exactly one value and nothing else: research, ai_tool, or global_life. "
             "For a hybrid topic, use the dominant mode specified by the routing rules."
         ),
         expected_output="Exactly one permitted article-type value.",
@@ -520,15 +562,21 @@ def resolve_article_type(topic: str, requested_type: str) -> str:
         inputs={"topic": topic}
     )
     normalized = str(result).lower()
-    for article_type in ("biomedical_science", "ai_research_tools", "global_life"):
+    for article_type in ("research", "ai_tool", "global_life"):
         if article_type in normalized:
             return article_type
-    logger.warning("Article router returned an unrecognized result; defaulting to AI tools: %r", normalized)
-    return "ai_research_tools"
+    logger.warning("Article router returned an unrecognized result; defaulting to AI Tool: %r", normalized)
+    return "ai_tool"
 
 
 # Crew builder
-def build_crew(article_type: str) -> Crew:
+def build_crew(
+    article_type: str,
+    *,
+    mimi_example: str,
+    workflow: str,
+    my_view: str,
+) -> Crew:
     llm_api_key = (
         os.getenv("OPENAI_API_KEY")
         if settings["llm_model"].startswith("openai/")
@@ -544,7 +592,12 @@ def build_crew(article_type: str) -> Crew:
     if settings["llm_model"].startswith("gemini/") and hasattr(llm, "supports_tools"):
         llm.supports_tools = False
 
-    editorial_prompt = prompt_for_article_type(article_type)
+    editorial_prompt = prompt_for_article(
+        article_type,
+        mimi_example=mimi_example,
+        workflow=workflow,
+        my_view=my_view,
+    )
 
     planner = Agent(
         role="Content Planner",
@@ -578,7 +631,7 @@ def build_crew(article_type: str) -> Crew:
         backstory=(
             "You are a rigorous but reader-centred editor for BlogGPT.\n\n"
             f"{editorial_prompt}\n\n"
-            f"{EDITORIAL_QUALITY_CHECK}"
+            f"{FINAL_QUALITY_CHECK}"
         ),
         allow_delegation=False,
         verbose=settings["crew_verbose"],
@@ -651,7 +704,7 @@ def build_crew(article_type: str) -> Crew:
             "source URLs from the live research; never fabricate or guess bibliographic details. Ensure the final "
             "'## References' list is complete, deduplicated, and consistent with the inline citations when sources "
             "are used. Do not introduce unsupported facts or revert current facts to older model knowledge.\n\n"
-            f"{editorial_prompt}\n\n{EDITORIAL_QUALITY_CHECK}"
+            f"{editorial_prompt}\n\n{FINAL_QUALITY_CHECK}"
         ),
         expected_output=(
             "A well-written blog post in markdown format (no leading word 'markdown'), ready for publication, "
@@ -723,7 +776,12 @@ async def generate_blog(request: TopicRequest) -> Dict[str, Any]:
         for attempt in range(LLM_EMPTY_RESPONSE_RETRIES + 1):
             # Crew and agent instances contain mutable execution state. A new
             # crew per attempt prevents state leaking across requests/retries.
-            crew = build_crew(resolved_article_type)
+            crew = build_crew(
+                resolved_article_type,
+                mimi_example=request.mimi_example,
+                workflow=request.workflow,
+                my_view=request.my_view,
+            )
             try:
                 show_progress(
                     "Running planner, writer, and editor"
@@ -790,12 +848,8 @@ async def generate_image(request: TopicRequest) -> Dict[str, str]:
         raise HTTPException(status_code=400, detail="'topic' must be provided")
 
     try:
-        image_data = await asyncio.to_thread(
-            generate_topic_image,
-            topic,
-            request.article_type,
-        )
-        return {"imageUrl": f"data:{image_data}"}
+        image = await asyncio.to_thread(generate_topic_image, topic)
+        return image
     except Exception as exc:
         logger.exception("Image generation failed for topic %r", topic)
         raise HTTPException(status_code=500, detail=str(exc)) from exc

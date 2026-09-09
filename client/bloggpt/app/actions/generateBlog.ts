@@ -8,9 +8,18 @@ const GENERATION_TIMEOUT_MS = 20 * 60 * 1_000;
 
 export type ArticleType =
     | "auto"
-    | "biomedical_science"
-    | "ai_research_tools"
-    | "global_life";
+    | "research"
+    | "ai_tool"
+    | "global_life"
+    | "hybrid";
+
+export type OptionalContentState = "auto" | "include" | "exclude";
+
+export interface OptionalContentOptions {
+    mimiExample: OptionalContentState;
+    workflow: OptionalContentState;
+    myView: OptionalContentState;
+}
 
 interface BlogResponse {
     topic: string;
@@ -30,8 +39,18 @@ interface BackendHttpResponse {
     body: string;
 }
 
-const postToBackend = (topic: string, articleType: ArticleType): Promise<BackendHttpResponse> => {
-    const payload = JSON.stringify({ topic, article_type: articleType });
+const postToBackend = (
+    topic: string,
+    articleType: ArticleType,
+    options: OptionalContentOptions,
+): Promise<BackendHttpResponse> => {
+    const payload = JSON.stringify({
+        topic,
+        article_type: articleType,
+        mimi_example: options.mimiExample,
+        workflow: options.workflow,
+        my_view: options.myView,
+    });
 
     return new Promise((resolve, reject) => {
         const backendRequest = request(
@@ -78,11 +97,12 @@ const isConnectionReset = (error: unknown): boolean => {
 export const generateBlog = async (
     topic: string,
     articleType: ArticleType,
+    options: OptionalContentOptions,
 ): Promise<GenerateBlogResult> => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
         const startedAt = Date.now();
         try {
-            const response = await postToBackend(topic, articleType);
+            const response = await postToBackend(topic, articleType, options);
 
             if (response.status < 200 || response.status >= 300) {
                 let message = `Backend request failed (${response.status})`;

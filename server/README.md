@@ -13,6 +13,7 @@ This folder contains a uv-based FastAPI server that replicates the CrewAI multi-
   - `OPENAI_API_KEY` (used by the planner, writer, and editor with GPT-5.6 Luna)
   - `GOOGLE_API_KEY`
   - `SERPER_API_KEY` (optional when `SEARCH_PROVIDER=auto` or `SEARCH_PROVIDER=gemini`)
+  - `UNSPLASH_ACCESS_KEY` (used to select the article hero image)
 
 Create a `.env` file in this `server/` directory:
 
@@ -20,11 +21,12 @@ Create a `.env` file in this `server/` directory:
 OPENAI_API_KEY=your_openai_api_key
 GOOGLE_API_KEY=your_google_api_key
 SERPER_API_KEY=your_serper_api_key
+UNSPLASH_ACCESS_KEY=your_unsplash_access_key
 SEARCH_PROVIDER=auto
 ```
 
-The article-writing crew uses `gpt-5.6-luna`. Gemini remains configured for
-Google Search grounding and hero-image generation.
+The article-writing crew uses `gpt-5.6-luna`. Gemini remains configured only for
+Google Search grounding; hero images come from Unsplash.
 
 Search provider modes:
 

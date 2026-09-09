@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { generateBlog, type ArticleType } from "./actions/generateBlog";
-import BlogInputForm from "@/components/BlogInputForm";
+import BlogInputForm, { type OptionalContentOptions } from "@/components/BlogInputForm";
 import InteractiveBlogLoader from "@/components/InteractiveBlogLoader";
 import {
   Card,
@@ -16,6 +16,12 @@ import { ArrowLeft, CheckCircle2, Download, FileText } from "lucide-react";
 import { marked, Renderer } from "marked";
 import Image from "next/image";
 import DOMPurify from "dompurify";
+
+interface UnsplashAttribution {
+  photographerName: string;
+  photographerUrl: string;
+  unsplashUrl: string;
+}
 
 const articleRenderer = new Renderer();
 const renderLink = articleRenderer.link.bind(articleRenderer);
@@ -31,6 +37,7 @@ const BlogGeneratorPage: React.FC = () => {
   const [currentTopic, setCurrentTopic] = useState<string>("");
   const [currentArticleType, setCurrentArticleType] = useState<ArticleType>("auto");
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  const [imageAttribution, setImageAttribution] = useState<UnsplashAttribution | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [imageError, setImageError] = useState<string | null>(null);
@@ -38,7 +45,11 @@ const BlogGeneratorPage: React.FC = () => {
   const [downloaded, setDownloaded] = useState<boolean>(false);
   const [markdownDownloaded, setMarkdownDownloaded] = useState<boolean>(false);
 
-  const handleGenerateBlog = async (topic: string, articleType: ArticleType) => {
+  const handleGenerateBlog = async (
+    topic: string,
+    articleType: ArticleType,
+    options: OptionalContentOptions,
+  ) => {
     setLoading(true);
     setError(null);
     setBlog(null);
@@ -46,12 +57,13 @@ const BlogGeneratorPage: React.FC = () => {
     setCurrentTopic(topic);
     setCurrentArticleType(articleType);
     setImageUrl(null);
+    setImageAttribution(null);
     setImageError(null);
     setDownloaded(false);
     setMarkdownDownloaded(false);
 
     try {
-      const generation = await generateBlog(topic, articleType);
+      const generation = await generateBlog(topic, articleType, options);
       if (!generation.ok) {
         setError(generation.error);
         return;
@@ -92,6 +104,11 @@ const BlogGeneratorPage: React.FC = () => {
           throw new Error(imageData.detail || "Failed to generate image");
         }
         setImageUrl(imageData.imageUrl);
+        setImageAttribution({
+          photographerName: imageData.photographerName,
+          photographerUrl: imageData.photographerUrl,
+          unsplashUrl: imageData.unsplashUrl,
+        });
       } catch (imageErr) {
         setImageError((imageErr as Error).message);
       }
@@ -108,6 +125,7 @@ const BlogGeneratorPage: React.FC = () => {
     setCurrentTopic("");
     setCurrentArticleType("auto");
     setImageUrl(null);
+    setImageAttribution(null);
     setImageError(null);
     setError(null);
     setDownloaded(false);
@@ -236,20 +254,41 @@ const BlogGeneratorPage: React.FC = () => {
                 </Button>
               </div>
               {imageUrl && (
-                <div className="relative w-full h-64 md:h-96 rounded-lg overflow-hidden">
-                  <Image
-                    src={imageUrl}
-                    alt="Generated blog image"
-                    unoptimized
-                    // layout="fill"
-                    fill
-                    // objectFit="cover"
-                    // className="transition-opacity duration-300 ease-in-out"
-                    className="object-cover transition-opacity duration-300 ease-in-out"
-                    onLoadingComplete={(image) =>
-                      image.classList.remove("opacity-0")
-                    }
-                  />
+                <div className="space-y-2">
+                  <div className="relative w-full h-64 md:h-96 rounded-lg overflow-hidden">
+                    <Image
+                      src={imageUrl}
+                      alt="Blog hero image from Unsplash"
+                      unoptimized
+                      fill
+                      className="object-cover transition-opacity duration-300 ease-in-out"
+                      onLoadingComplete={(image) =>
+                        image.classList.remove("opacity-0")
+                      }
+                    />
+                  </div>
+                  {imageAttribution && (
+                    <p className="text-sm text-neutral-500 dark:text-neutral-400">
+                      Photo by{" "}
+                      <a
+                        href={imageAttribution.photographerUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline"
+                      >
+                        {imageAttribution.photographerName}
+                      </a>{" "}
+                      on{" "}
+                      <a
+                        href={imageAttribution.unsplashUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline"
+                      >
+                        Unsplash
+                      </a>
+                    </p>
+                  )}
                 </div>
               )}
               {imageError && (

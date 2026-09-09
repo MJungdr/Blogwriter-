@@ -100,11 +100,13 @@ This opens separate PowerShell windows for the backend and frontend. Keep those 
    OPENAI_API_KEY=your_openai_api_key
    GOOGLE_API_KEY=your_google_api_key
    SERPER_API_KEY=your_serper_api_key
+   UNSPLASH_ACCESS_KEY=your_unsplash_access_key
    SEARCH_PROVIDER=auto
    ```
 
    `OPENAI_API_KEY` powers the GPT-5.6 Luna planner, writer, and editor.
-   `GOOGLE_API_KEY` remains required for Gemini-backed web research and image generation.
+   `GOOGLE_API_KEY` remains required for Gemini-backed web research. Hero images use
+   `UNSPLASH_ACCESS_KEY` instead.
 
    `SEARCH_PROVIDER=auto` tries Serper first, then uses Gemini Google Search grounding if Serper is unavailable. Set it to `gemini` to use only Gemini search, or `serper` to require Serper.
 
